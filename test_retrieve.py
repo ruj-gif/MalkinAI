@@ -1,15 +1,20 @@
 """Offline tests for semantic retrieval using small fake vectors."""
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from embed_chunks import MODEL_NAME
+from embed_chunks import MODEL_DIMENSION, MODEL_NAME
 from retrieve import (
+    PROJECT_DIR,
     cosine_similarity,
     keyword_match_score,
     load_index,
+    load_query_encoder,
     normalize_query,
     search,
 )
@@ -155,6 +160,48 @@ class RetrievalTests(unittest.TestCase):
             path = Path(temp_dir) / "index.json"
             path.write_text(json.dumps(self.index), encoding="utf-8")
             self.assertEqual(load_index(path)["count"], 3)
+
+    def test_checked_in_project_index_loads_and_returns_search_results(self):
+        index = load_index(PROJECT_DIR / "processed" / "embeddings.json")
+        self.assertEqual(index["count"], 212)
+        results = search(
+            "business support",
+            index,
+            lambda _: [1.0] + [0.0] * (MODEL_DIMENSION - 1),
+            top_k=2,
+        )
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result["source"] and result["page"] >= 1 for result in results))
+
+    def test_query_encoder_downloads_model_if_deployment_cache_is_empty(self):
+        calls = []
+
+        class FakeVector:
+            def tolist(self):
+                return [1.0] + [0.0] * (MODEL_DIMENSION - 1)
+
+        class FakeModel:
+            def get_embedding_dimension(self):
+                return MODEL_DIMENSION
+
+            def encode(self, *args, **kwargs):
+                return [FakeVector()]
+
+        def fake_sentence_transformer(model_name, device, **kwargs):
+            calls.append((model_name, device, kwargs))
+            if kwargs.get("local_files_only"):
+                raise OSError("model is not cached")
+            return FakeModel()
+
+        module = SimpleNamespace(SentenceTransformer=fake_sentence_transformer)
+        with patch.dict(sys.modules, {"sentence_transformers": module}):
+            encoder = load_query_encoder()
+
+        self.assertEqual(encoder("support"), [1.0] + [0.0] * (MODEL_DIMENSION - 1))
+        self.assertTrue(calls[0][2]["local_files_only"])
+        self.assertEqual(calls[1][0], MODEL_NAME)
+        self.assertEqual(calls[1][1], "cpu")
+        self.assertNotIn("local_files_only", calls[1][2])
 
     def test_load_index_rejects_invalid_vector_and_missing_file(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent / "processed") as temp_dir:

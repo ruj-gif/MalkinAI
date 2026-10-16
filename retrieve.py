@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import math
 from pathlib import Path
 import re
@@ -10,6 +11,7 @@ from typing import Any, Callable, Sequence
 from embed_chunks import MODEL_DIMENSION, MODEL_NAME
 
 
+LOGGER = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parent
 INDEX_PATH = PROJECT_DIR / "processed" / "embeddings.json"
 REQUIRED_ITEM_FIELDS = ("chunk_id", "source", "page", "text", "embedding")
@@ -134,7 +136,7 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
 
 
 def load_query_encoder() -> Callable[[str], Sequence[float]]:
-    """Load the existing sentence-transformer model from disk without network access."""
+    """Load the CPU query encoder, downloading the model if this runtime lacks it."""
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as exc:
@@ -144,12 +146,24 @@ def load_query_encoder() -> Callable[[str], Sequence[float]]:
         ) from exc
 
     try:
+        # Prefer the cache so local/offline retrieval remains fast and predictable.
         model = SentenceTransformer(MODEL_NAME, device="cpu", local_files_only=True)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Model {MODEL_NAME} is not fully available in the local cache. "
-            "Run the embedding stage once with internet access before offline retrieval."
-        ) from exc
+    except Exception as cache_error:
+        LOGGER.info(
+            "Embedding model %s is not fully cached; trying a one-time model download.",
+            MODEL_NAME,
+        )
+        try:
+            # Streamlit Cloud starts with a fresh cache unless model artifacts are
+            # explicitly persisted. Allow the standard Hugging Face download path.
+            model = SentenceTransformer(MODEL_NAME, device="cpu")
+        except Exception as download_error:
+            raise RuntimeError(
+                f"Query model {MODEL_NAME} was unavailable in the local cache "
+                f"({type(cache_error).__name__}) and model download failed "
+                f"({type(download_error).__name__}). Check outbound access to the "
+                "Hugging Face model hub or pre-cache this model in the deployment."
+            ) from None
     dimension = model.get_embedding_dimension()
     if dimension != MODEL_DIMENSION:
         raise RuntimeError(

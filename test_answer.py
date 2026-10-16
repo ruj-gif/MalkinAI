@@ -103,6 +103,20 @@ class AnswerTests(unittest.TestCase):
         answer_question("My question", top_k=3, groq_client=client, retriever=retriever)
         retriever.assert_called_once_with("My question", 3)
 
+    def test_retrieval_diagnostics_log_failure_without_credentials(self):
+        def failing_retriever(question, top_k):
+            raise RuntimeError("embedding model unavailable; GROQ_API_KEY=gsk_secret-value")
+
+        with self.assertLogs("answer", level="ERROR") as captured:
+            with self.assertRaisesRegex(AnswerError, "Local retrieval failed"):
+                answer_question("Question", retriever=failing_retriever)
+
+        logged = "\n".join(captured.output)
+        self.assertIn("RuntimeError", logged)
+        self.assertIn("embedding model unavailable", logged)
+        self.assertIn("GROQ_API_KEY=[REDACTED]", logged)
+        self.assertNotIn("gsk_secret-value", logged)
+
     def test_empty_retrieval_returns_insufficient_evidence_without_api_call(self):
         client = mocked_client()
         result = answer_question("Question", passages=[], groq_client=client)
