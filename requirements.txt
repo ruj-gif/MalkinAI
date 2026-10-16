@@ -1,0 +1,6 @@
+pymupdf
+pytesseract
+sentence-transformers
+groq
+python-dotenv
+streamlit
