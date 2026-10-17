@@ -55,6 +55,22 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in history], ["user", "assistant"])
         self.assertIn("[Scheme.pdf, p. 2]", history[1]["content"])
 
+    def test_official_source_verification_is_optional_and_forwarded(self):
+        calls = []
+
+        def backend(question, **kwargs):
+            calls.append(kwargs)
+            return "Answer"
+
+        submit_message(
+            [],
+            "What does MUDRA support?",
+            {},
+            backend=backend,
+            official_research=True,
+        )
+        self.assertTrue(calls[0]["official_research"])
+
     def test_backend_error_is_safe_and_keeps_turn_in_history(self):
         def backend(question, **kwargs):
             raise AnswerError("Groq request failed. secret=never-show")

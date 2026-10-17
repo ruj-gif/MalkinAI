@@ -29,7 +29,7 @@ SAMPLE_PASSAGE = {
 }
 
 
-def response_json(documented=None, uncertain=None, suggestions=None, follow_up=None):
+def response_json(documented=None, uncertain=None, suggestions=None, follow_up=None, official=None):
     payload = {
         "documented": documented or [{
             "claim": "A retrieved passage describes business support",
@@ -37,6 +37,7 @@ def response_json(documented=None, uncertain=None, suggestions=None, follow_up=N
         }],
         "uncertain": uncertain or [],
         "suggestions": suggestions or [],
+        "official": official or [],
     }
     if follow_up is not None:
         payload["follow_up"] = follow_up
@@ -453,9 +454,97 @@ class AnswerTests(unittest.TestCase):
             client.chat.completions.create.call_args.kwargs["messages"][0]["content"],
         )
 
-    def test_official_research_is_a_disabled_extension_point(self):
-        with self.assertRaisesRegex(NotImplementedError, "not implemented"):
-            search_official_sources("current scheme details")
+    def test_official_research_has_no_match_for_unconfigured_topics(self):
+        result = search_official_sources("How can I improve my shop branding?")
+        self.assertEqual(result["status"], "no_sources")
+        self.assertEqual(result["sources"], [])
+
+    def test_successful_official_verification_has_clickable_source_attribution(self):
+        official_source = {
+            "source_id": "pmmy_dfs",
+            "source_name": "Forged source name",
+            "url": "https://financialservices.gov.in/pradhan-mantri-mudra-yojana-pmmy",
+            "accessed_at": "2026-10-17T10:00:00+00:00",
+            "text": (
+                "Pradhan Mantri MUDRA Yojana PMMY provides term loan and working capital "
+                "requirements through Member Lending Institutions including banks, NBFCs, "
+                "and MFIs. Shishu and Kishore are loan categories."
+            ),
+        }
+        result_data = {
+            "status": "complete",
+            "sources": [official_source],
+            "message": "Selected official sources were retrieved.",
+        }
+        model_response = response_json(
+            documented=[{
+                "claim": "A retrieved passage describes business support",
+                "evidence_ids": [SAMPLE_PASSAGE["chunk_id"]],
+            }],
+            official=[{
+                "claim": "PMMY can meet term loan and working capital requirements through Member Lending Institutions.",
+                "source_ids": ["pmmy_dfs"],
+            }],
+        )
+        result = answer_question(
+            "What does MUDRA support?",
+            passages=[SAMPLE_PASSAGE],
+            groq_client=mocked_client(model_response),
+            official_research=True,
+            official_researcher=Mock(return_value=result_data),
+        )
+        self.assertIn("What the documents say", result)
+        self.assertIn("Verified from official sources (checked 2026-10-17)", result)
+        self.assertIn(
+            "[Department of Financial Services, Ministry of Finance — PMMY](https://financialservices.gov.in/pradhan-mantri-mudra-yojana-pmmy)",
+            result,
+        )
+        self.assertNotIn("Forged source name", result)
+        self.assertIn("loan and working capital requirements", result)
+
+    def test_failed_official_research_keeps_local_answer_and_cites_it(self):
+        client = mocked_client(response_json())
+
+        def failing_researcher(question, user_context):
+            raise TimeoutError("Request failed with GROQ_API_KEY=gsk_secret-value")
+
+        result = answer_question(
+            "What support is described?",
+            passages=[SAMPLE_PASSAGE],
+            groq_client=client,
+            official_research=True,
+            official_researcher=failing_researcher,
+        )
+        self.assertIn("What the documents say", result)
+        self.assertIn("[Sample Scheme.pdf, p. 3]", result)
+        self.assertIn("Official-source verification could not be completed", result)
+        self.assertNotIn("gsk_secret-value", result)
+
+    def test_unsupported_official_claim_is_not_rendered(self):
+        official_source = {
+            "source_id": "pmmy_dfs",
+            "url": "https://financialservices.gov.in/pradhan-mantri-mudra-yojana-pmmy",
+            "accessed_at": "2026-10-17T10:00:00+00:00",
+            "text": (
+                "PMMY credit is extended through Member Lending Institutions including "
+                "banks, non-banking financial companies, and microfinance institutions. "
+                "This official page describes loan categories and the purposes supported "
+                "under the Pradhan Mantri MUDRA Yojana."
+            ),
+        }
+        result = answer_question(
+            "What does MUDRA offer?",
+            passages=[],
+            groq_client=mocked_client(response_json(official=[{
+                "claim": "PMMY guarantees every applicant a ₹20 lakh loan at a fixed interest rate.",
+                "source_ids": ["pmmy_dfs"],
+            }])),
+            official_research=True,
+            official_researcher=Mock(return_value={"status": "complete", "sources": [official_source]}),
+        )
+        self.assertNotIn("guarantees every applicant", result)
+        self.assertNotIn("₹20 lakh", result)
+        self.assertIn("no claim passed the source-support checks", result)
 
     def test_invalid_retrieval_page_metadata_is_rejected_before_api_call(self):
         invalid = dict(SAMPLE_PASSAGE, page=0)

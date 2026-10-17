@@ -72,6 +72,7 @@ def submit_message(
     question: str,
     profile: dict[str, Any],
     backend: Callable[..., str] = answer_question,
+    official_research: bool = False,
 ) -> dict[str, Any]:
     """Append a user turn and its backend response to the current session history."""
     question = question.strip()
@@ -80,7 +81,10 @@ def submit_message(
     history.append({"role": "user", "content": question})
     context = build_profile_context(profile)
     try:
-        answer = backend(question, user_context=context or None)
+        backend_options: dict[str, Any] = {"user_context": context or None}
+        if official_research:
+            backend_options["official_research"] = True
+        answer = backend(question, **backend_options)
         if not isinstance(answer, str) or not answer.strip():
             raise AnswerError("The answer service returned an empty response.")
         assistant_message = {"role": "assistant", "content": answer.strip()}
@@ -309,6 +313,15 @@ def main() -> None:
         st.selectbox("Business stage", ["Exploring", "Planning", "Already operating"], key="profile_stage")
         st.selectbox("Preferred language", ["English", "Hindi", "Gujarati", "Other"], key="profile_language")
         st.caption("Language preference is saved for future multilingual support; responses currently remain in English.")
+        st.checkbox(
+            "Verify with official sources online",
+            key="official_research_enabled",
+            help=(
+                "When enabled, Malkin AI fetches relevant pages from the Department "
+                "of Financial Services and FSSAI/FoSCoS. This does not guarantee loan approval."
+            ),
+        )
+        st.caption("Optional online checking uses official pages only; uploaded-PDF citations remain separate.")
         st.button("Clear profile", on_click=_reset_profile, use_container_width=True)
 
     if page == "About Malkin AI":
@@ -367,6 +380,7 @@ def main() -> None:
                         st.session_state.messages,
                         question,
                         profile,
+                        official_research=st.session_state.get("official_research_enabled", False),
                     )
                 if assistant_message.get("error"):
                     st.error(assistant_message["content"])
