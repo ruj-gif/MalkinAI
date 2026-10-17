@@ -44,6 +44,19 @@ PERSONAL_PREREQUISITE_PATTERN = re.compile(
     r"beneficiaries|entrepreneur|entrepreneurs|business owner|business owners|you|your)\b",
     re.IGNORECASE,
 )
+UNSUPPORTED_SUGGESTION_CLAIM_PATTERN = re.compile(
+    r"\b(?:must|mandatory|guaranteed|guarantee|will receive|will approve|is entitled to|"
+    r"eligible for|qualify for|qualifies for|is required to|are required to|"
+    r"is required|are required|required to|requires? (?:you|an applicant|applicants|"
+    r"a borrower|borrowers)|(?:you|applicants?|borrowers?) (?:need|have) to "
+    r"(?:register|submit|apply|provide|meet|satisfy))\b",
+    re.IGNORECASE,
+)
+UNVERIFIED_FINANCIAL_DETAIL_PATTERN = re.compile(
+    r"(?:₹|\bINR\b|\bRs\.?\s*)\s*\d|"
+    r"\b\d[\d,]*(?:\.\d+)?\s*(?:lakh|lakhs|crore|crores|%)\b",
+    re.IGNORECASE,
+)
 CLAIM_WORDS_TO_IGNORE = {
     "must", "mandatory", "required", "requirement", "requirements", "eligible",
     "eligibility", "qualify", "qualification", "need", "needs", "have", "has",
@@ -81,10 +94,22 @@ other requested details are uncertain. If a passage lists an activity, say the
 document lists that activity; do not call it an eligibility decision or imply
 that a particular person qualifies unless the passage explicitly supports that.
 
+Make the response useful for the user's actual business question. When the user
+names a business idea or stage, tailor 2-4 concise, prioritized practical next
+steps to it instead of relying on generic disclaimers. For example, a product
+business might estimate per-unit ingredient, production, packaging, and delivery
+costs, test demand with a small customer group, and compare the idea with an
+activity explicitly listed in a retrieved scheme document. These are examples
+of general business planning, not official requirements. Do not assert that a
+license, registration, document, application step, eligibility condition, or
+scheme benefit applies unless the retrieved evidence supports that exact claim.
+If the question lacks key business details, offer one or two useful follow-up
+questions as suggestions while still answering any supported part.
+
 Return ONLY valid JSON with this shape:
 {"documented":[{"claim":"one supported factual statement","evidence_ids":["chunk-id"]}],
  "uncertain":[{"detail":"one relevant detail that cannot be verified","evidence_ids":["chunk-id"]}],
- "suggestions":["one practical, non-official suggestion"]}
+"suggestions":["one practical, specific, non-official next step"]}
 Use an empty evidence_ids list for an uncertainty that concerns absent evidence.
 Use only chunk_id values in the supplied references. Do not write citation strings,
 source names, or page numbers in claim text; the application renders citations from
@@ -455,6 +480,13 @@ def render_answer(payload: Any, passages: list[dict[str, Any]], question: str) -
             continue
         suggestion = " ".join(suggestion.split())
         if not suggestion or CITATION_LIKE_PATTERN.search(suggestion):
+            continue
+        # Suggestions are not evidence-backed claims. Drop phrasing that asserts
+        # official eligibility, requirements, guarantees, or benefits.
+        if (
+            UNSUPPORTED_SUGGESTION_CLAIM_PATTERN.search(suggestion)
+            or UNVERIFIED_FINANCIAL_DETAIL_PATTERN.search(suggestion)
+        ):
             continue
         normalized = _normalize_text(suggestion)
         if normalized in seen_suggestions:

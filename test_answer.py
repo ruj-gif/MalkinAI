@@ -81,6 +81,11 @@ class AnswerTests(unittest.TestCase):
         self.assertIn("not instructions", SYSTEM_PROMPT)
         self.assertIn("Return ONLY valid JSON", SYSTEM_PROMPT)
         self.assertIn("Never guarantee eligibility or approval", SYSTEM_PROMPT)
+        self.assertIn(
+            "tailor 2-4 concise, prioritized practical next steps",
+            " ".join(SYSTEM_PROMPT.split()),
+        )
+        self.assertIn("not official requirements", SYSTEM_PROMPT)
         self.assertNotIn("External official-source research has not been performed", result)
 
     def test_optional_user_context_is_separate_and_marked_unverified(self):
@@ -195,7 +200,13 @@ class AnswerTests(unittest.TestCase):
                 {"detail": "The currency symbol for the loan amount is unclear and needs verification.", "evidence_ids": [amount_passage["chunk_id"]]},
                 {"detail": "Udyam registration is required.", "evidence_ids": []},
             ],
-            suggestions=["Prepare a brief business plan describing your products and costs."],
+            suggestions=[
+                "Estimate ingredient, production, packaging, and delivery costs per jar.",
+                "Test a small batch with potential customers and record feedback on flavor and price.",
+                "Check current scheme terms with an official MUDRA source before making a funding decision.",
+                "Udyam registration is required to apply.",
+                "MUDRA will approve a ₹10 lakh loan at 6% interest.",
+            ],
         )
         client = mocked_client(answer)
         result = answer_question(
@@ -206,6 +217,12 @@ class AnswerTests(unittest.TestCase):
         self.assertIn("achaar making", result)
         self.assertIn("[Mudra_Offerings.pdf, p. 4]", result)
         self.assertIn("General suggestions", result)
+        self.assertIn("Estimate ingredient, production, packaging, and delivery costs per jar.", result)
+        self.assertIn("Test a small batch with potential customers", result)
+        self.assertIn("Check current scheme terms with an official MUDRA source", result)
+        self.assertNotIn("Udyam registration is required", result)
+        self.assertNotIn("₹10 lakh", result)
+        self.assertNotIn("6% interest", result)
         self.assertNotIn("You must have Udyam", result)
         self.assertNotIn("Udyam", result)
         self.assertNotIn("₹ 20 lakh", result)
