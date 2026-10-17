@@ -14,6 +14,7 @@ from answer import (
     SYSTEM_PROMPT,
     SUSPICIOUS_AMOUNT_PATTERN,
     _load_configuration,
+    _is_simple_greeting,
     _contains_corrupt_amount,
     answer_question,
     search_official_sources,
@@ -91,6 +92,32 @@ class AnswerTests(unittest.TestCase):
         )
         self.assertIn("not official requirements", SYSTEM_PROMPT)
         self.assertNotIn("External official-source research has not been performed", result)
+
+    def test_simple_greeting_skips_retrieval_and_groq(self):
+        retriever = Mock(side_effect=AssertionError("retrieval should not run"))
+        client = mocked_client()
+        result = answer_question("hiiii", retriever=retriever, groq_client=client)
+        self.assertIn("Hi! I’m Malkin AI", result)
+        retriever.assert_not_called()
+        client.chat.completions.create.assert_not_called()
+
+    def test_greeting_with_business_question_still_uses_retrieval(self):
+        self.assertFalse(_is_simple_greeting("Hi, I want to start a pickle business"))
+        retriever = Mock(return_value=[SAMPLE_PASSAGE])
+        client = mocked_client()
+        answer_question("Hi, what support is described?", retriever=retriever, groq_client=client)
+        retriever.assert_called_once()
+        client.chat.completions.create.assert_called_once()
+
+    def test_streamlit_secrets_can_supply_cloud_configuration(self):
+        with patch.dict(os.environ, {}, clear=True), patch("answer.load_dotenv"):
+            with patch("answer._streamlit_secret", side_effect={
+                "GROQ_API_KEY": "cloud-test-key",
+                "GROQ_MODEL": "cloud/model",
+            }.get):
+                key, model = _load_configuration()
+        self.assertEqual(key, "cloud-test-key")
+        self.assertEqual(model, "cloud/model")
 
     def test_optional_user_context_is_separate_and_marked_unverified(self):
         client = mocked_client()
@@ -617,11 +644,18 @@ class AnswerTests(unittest.TestCase):
 
     def test_api_error_is_sanitized(self):
         client = mocked_client()
-        client.chat.completions.create.side_effect = RuntimeError("secret=test-key-never-print")
-        with self.assertRaises(AnswerError) as error:
-            answer_question("Question", passages=[SAMPLE_PASSAGE], groq_client=client)
+        client.chat.completions.create.side_effect = RuntimeError(
+            "network failed while using test-key-never-print"
+        )
+        with self.assertLogs("answer", level="ERROR") as captured:
+            with self.assertRaises(AnswerError) as error:
+                answer_question("Question", passages=[SAMPLE_PASSAGE], groq_client=client)
+        logged = "\n".join(captured.output)
         self.assertIn("Groq request failed", str(error.exception))
         self.assertNotIn("test-key-never-print", str(error.exception))
+        self.assertIn("RuntimeError", logged)
+        self.assertIn("Traceback:", logged)
+        self.assertNotIn("test-key-never-print", logged)
 
     def test_empty_question_is_rejected(self):
         with self.assertRaisesRegex(AnswerError, "non-empty"):

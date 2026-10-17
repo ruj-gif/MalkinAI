@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import logging
 from typing import Any, Callable, MutableMapping
 
-from answer import AnswerError, answer_question
+from answer import (
+    AnswerError,
+    _safe_diagnostic_detail,
+    _safe_diagnostic_traceback,
+    answer_question,
+)
 from business_memory import (
     build_memory_context,
     empty_business_memory,
@@ -38,6 +44,7 @@ STARTER_PROMPTS = (
     "Help me plan a small business with a limited budget.",
     "What information do you need to recommend schemes?",
 )
+LOGGER = logging.getLogger(__name__)
 MICROPHONE_MESSAGE = "Voice input is coming soon. We are not recording audio yet."
 PROFILE_DEFAULTS = {
     "profile_idea": "",
@@ -133,7 +140,10 @@ def safe_error_message(error: Exception) -> str:
     """Map backend exceptions to useful UI errors without exposing internals."""
     message = str(error).casefold()
     if "groq_api_key" in message:
-        return "The answer service is not configured yet. Check the project’s local .env setup."
+        return (
+            "The answer service is not configured yet. Check the local .env setup or "
+            "GROQ_API_KEY in Streamlit Cloud Secrets."
+        )
     if "retrieval" in message or "embedding index" in message:
         return "I couldn’t search the local scheme documents. Please check the processed files and try again."
     if "groq request" in message or "groq" in message or "network" in message:
@@ -193,6 +203,13 @@ def submit_message(
             raise AnswerError("The answer service returned an empty response.")
         assistant_message = {"role": "assistant", "content": answer.strip()}
     except Exception as exc:  # UI boundary: never surface stack traces or raw payloads.
+        if not isinstance(exc, AnswerError):
+            LOGGER.error(
+                "Unexpected answer pipeline failure (%s): %s\nTraceback:\n%s",
+                type(exc).__name__,
+                _safe_diagnostic_detail(exc),
+                _safe_diagnostic_traceback(exc),
+            )
         assistant_message = {
             "role": "assistant",
             "content": safe_error_message(exc),

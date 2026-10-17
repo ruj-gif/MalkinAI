@@ -182,9 +182,15 @@ _CREDENTIAL_PATTERN = re.compile(
 )
 
 
-def _safe_diagnostic_detail(error: Exception) -> str:
+def _safe_diagnostic_detail(
+    error: Exception, sensitive_values: tuple[str, ...] = ()
+) -> str:
     """Return useful error context with common credential formats redacted."""
-    return _redact_diagnostic_text(str(error).strip() or "No error message provided.")[:500]
+    detail = _redact_diagnostic_text(str(error).strip() or "No error message provided.")
+    for secret in sensitive_values:
+        if secret:
+            detail = detail.replace(secret, "[REDACTED]")
+    return detail[:500]
 
 
 def _redact_diagnostic_text(value: str) -> str:
@@ -196,11 +202,41 @@ def _redact_diagnostic_text(value: str) -> str:
     )
 
 
-def _safe_diagnostic_traceback(error: Exception) -> str:
+def _safe_diagnostic_traceback(
+    error: Exception, sensitive_values: tuple[str, ...] = ()
+) -> str:
     """Format a traceback without exposing common credential formats."""
-    return _redact_diagnostic_text(
+    rendered = _redact_diagnostic_text(
         "".join(traceback.format_exception(type(error), error, error.__traceback__))
     )
+    for secret in sensitive_values:
+        if secret:
+            rendered = rendered.replace(secret, "[REDACTED]")
+    return rendered
+
+
+_GREETING_PATTERN = re.compile(
+    r"^(?:hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|namaste)[\s!.?,]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_simple_greeting(question: str) -> bool:
+    """Recognize only standalone greetings, leaving mixed requests untouched."""
+    return bool(_GREETING_PATTERN.fullmatch(" ".join(question.split())))
+
+
+def _streamlit_secret(name: str) -> str:
+    """Read an optional Streamlit Cloud secret without exposing its value."""
+    try:
+        import streamlit as st
+
+        value = st.secrets.get(name, "")
+    except Exception as exc:
+        # Streamlit raises when no secrets file/store is configured locally.
+        LOGGER.debug("Streamlit secret lookup unavailable (%s).", type(exc).__name__)
+        return ""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def search_official_sources(
@@ -795,12 +831,15 @@ def _load_configuration() -> tuple[str, str]:
     # Resolve the .env beside this module so behavior does not depend on the
     # caller's current working directory.
     load_dotenv(dotenv_path=ENV_PATH)
-    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    api_key = os.getenv("GROQ_API_KEY", "").strip() or _streamlit_secret("GROQ_API_KEY")
     configured_model = os.getenv("GROQ_MODEL")
+    if configured_model is None:
+        configured_model = _streamlit_secret("GROQ_MODEL") or None
     model_id = configured_model.strip() if configured_model is not None else DEFAULT_MODEL_ID
     if not api_key:
         raise AnswerError(
-            f"GROQ_API_KEY is missing. Add it to {ENV_PATH} or set it in the environment."
+            f"GROQ_API_KEY is missing. Add it to {ENV_PATH}, the process environment, "
+            "or Streamlit Cloud Secrets."
         )
     if not model_id or not MODEL_ID_PATTERN.fullmatch(model_id):
         raise AnswerError(
@@ -838,6 +877,12 @@ def answer_question(
         raise AnswerError("Please enter a non-empty question.")
     if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
         raise AnswerError("top_k must be a positive integer.")
+
+    # A standalone greeting is conversational rather than a scheme lookup. Keep
+    # this before retrieval and configuration so it works without local files or
+    # a Groq credential, while mixed greetings plus questions follow normal RAG.
+    if _is_simple_greeting(question.strip()):
+        return "Hi! I’m Malkin AI. What business idea or government support question can I help you explore?"
 
     if passages is None:
         try:
@@ -906,10 +951,9 @@ def answer_question(
             )
         return insufficient
 
-    api_key, selected_model = _load_configuration()
-    client = groq_client if groq_client is not None else _create_groq_client(api_key)
-
     try:
+        api_key, selected_model = _load_configuration()
+        client = groq_client if groq_client is not None else _create_groq_client(api_key)
         response = client.chat.completions.create(
             model=selected_model,
             messages=build_messages(
@@ -944,6 +988,15 @@ def answer_question(
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
         status = f" (HTTP {status_code})" if isinstance(status_code, int) else ""
+        LOGGER.error(
+            "Groq answer generation failed (%s)%s: %s\nTraceback:\n%s",
+            type(exc).__name__,
+            status,
+            _safe_diagnostic_detail(exc, (api_key,)),
+            _safe_diagnostic_traceback(exc, (api_key,)),
+        )
+        if isinstance(exc, AnswerError):
+            raise
         raise AnswerError(
             f"Groq request failed{status}. Check the network, API key, model ID, and account limits."
         ) from None
