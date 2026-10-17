@@ -29,15 +29,18 @@ SAMPLE_PASSAGE = {
 }
 
 
-def response_json(documented=None, uncertain=None, suggestions=None):
-    return json.dumps({
+def response_json(documented=None, uncertain=None, suggestions=None, follow_up=None):
+    payload = {
         "documented": documented or [{
             "claim": "A retrieved passage describes business support",
             "evidence_ids": ["chunk-000003"],
         }],
         "uncertain": uncertain or [],
         "suggestions": suggestions or [],
-    })
+    }
+    if follow_up is not None:
+        payload["follow_up"] = follow_up
+    return json.dumps(payload)
 
 
 def mocked_client(content=None):
@@ -94,13 +97,55 @@ class AnswerTests(unittest.TestCase):
             "What support could I explore?",
             passages=[SAMPLE_PASSAGE],
             groq_client=client,
-            user_context="State or Union Territory: Gujarat",
+            user_context=(
+                "- Business idea: pickle making\n"
+                "- State or Union Territory: Gujarat\n"
+                "- Approximate starting budget (INR): 100000\n"
+                "- Business stage: Planning\n"
+                "These details are user-provided context, not verified facts."
+            ),
         )
         prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
         self.assertIn("User question:\nWhat support could I explore?", prompt)
         self.assertIn("Optional user-provided business context (unverified", prompt)
+        self.assertIn("Business idea: pickle making", prompt)
         self.assertIn("State or Union Territory: Gujarat", prompt)
+        self.assertIn("Approximate starting budget (INR): 100000", prompt)
+        self.assertIn("Business stage: Planning", prompt)
         self.assertIn("not evidence of scheme rules, eligibility", prompt)
+
+    def test_missing_profile_is_optional_and_does_not_create_context(self):
+        client = mocked_client()
+        answer_question("What support is described?", passages=[SAMPLE_PASSAGE], groq_client=client)
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        self.assertNotIn("Optional user-provided business context", prompt)
+
+    def test_supplied_state_and_budget_guide_follow_up_without_reasking(self):
+        profile_context = (
+            "- Business idea: pickle making\n"
+            "- State or Union Territory: Gujarat\n"
+            "- Approximate starting budget (INR): 100000\n"
+            "- Business stage: Planning\n"
+            "These details are user-provided context, not verified facts."
+        )
+        client = mocked_client(response_json(
+            documented=[{
+                "claim": "The document lists achaar making as an activity",
+                "evidence_ids": [SAMPLE_PASSAGE["chunk_id"]],
+            }],
+            follow_up="What products or pack sizes are you considering first?",
+        ))
+        result = answer_question(
+            "I want to start a pickle business.",
+            passages=[dict(SAMPLE_PASSAGE, text="The document lists achaar making as an activity.", source="Mudra_Offerings.pdf", page=4)],
+            user_context=profile_context,
+            groq_client=client,
+        )
+        self.assertIn("Gujarat", client.chat.completions.create.call_args.kwargs["messages"][1]["content"])
+        self.assertIn("100000", client.chat.completions.create.call_args.kwargs["messages"][1]["content"])
+        self.assertIn("[Mudra_Offerings.pdf, p. 4]", result)
+        self.assertTrue(result.endswith("What products or pack sizes are you considering first?"))
+        self.assertNotIn("Which state or union territory", result)
 
     def test_uses_existing_retrieval_pipeline(self):
         client = mocked_client()
@@ -231,6 +276,7 @@ class AnswerTests(unittest.TestCase):
         self.assertIn("[Mudra_Offerings.pdf, p. 2]", result)
         self.assertNotIn("[Mudra_Offerings.pdf, p. 4]", result.split("General suggestions")[-1])
         self.assertIn("External official-source research has not been performed", result)
+        self.assertTrue(result.endswith("Which state or union territory do you plan to operate in?"))
 
     def test_unsupported_prerequisite_is_withheld_without_dropping_supported_fact(self):
         passages = [

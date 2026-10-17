@@ -45,7 +45,10 @@ class AppIntegrationTests(unittest.TestCase):
             backend=backend,
         )
         self.assertEqual(calls[0][0], STARTER_PROMPTS[0])
+        self.assertIn("Business idea: Pickle making", calls[0][1]["user_context"])
         self.assertIn("State or Union Territory: Gujarat", calls[0][1]["user_context"])
+        self.assertIn("Approximate starting budget (INR): 100000", calls[0][1]["user_context"])
+        self.assertIn("Business stage: Planning", calls[0][1]["user_context"])
         self.assertIn("not verified facts", calls[0][1]["user_context"])
         self.assertNotIn("Hindi", calls[0][1]["user_context"])
         self.assertEqual(response["content"], "A supported statement [Scheme.pdf, p. 2]")

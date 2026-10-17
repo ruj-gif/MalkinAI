@@ -106,10 +106,21 @@ scheme benefit applies unless the retrieved evidence supports that exact claim.
 If the question lacks key business details, offer one or two useful follow-up
 questions as suggestions while still answering any supported part.
 
+Use any provided business profile details (idea, state or union territory,
+approximate INR budget, and business stage) to make the practical suggestions
+specific. Do not assume missing values. These details are user supplied and are
+not evidence of scheme eligibility or official facts. End with at most one
+concise, useful follow-up question when more user context would improve the
+guidance. Do not ask again for a profile value already supplied. For a business
+idea with no state supplied, ask which state or union territory they plan to
+operate in. If state and budget are supplied, use them to tailor planning steps
+without inferring eligibility. If no follow-up is useful, set follow_up to null.
+
 Return ONLY valid JSON with this shape:
 {"documented":[{"claim":"one supported factual statement","evidence_ids":["chunk-id"]}],
  "uncertain":[{"detail":"one relevant detail that cannot be verified","evidence_ids":["chunk-id"]}],
-"suggestions":["one practical, specific, non-official next step"]}
+ "suggestions":["one practical, specific, non-official next step"],
+ "follow_up":"one context-specific user question, or null"}
 Use an empty evidence_ids list for an uncertainty that concerns absent evidence.
 Use only chunk_id values in the supplied references. Do not write citation strings,
 source names, or page numbers in claim text; the application renders citations from
@@ -272,6 +283,41 @@ def _normalize_text(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
+def _profile_value(user_context: str | None, label: str) -> str:
+    """Read one labeled value from app.py's unverified profile context."""
+    if not user_context:
+        return ""
+    pattern = re.compile(rf"^\s*-\s*{re.escape(label)}:\s*(.*?)\s*$", re.IGNORECASE)
+    for line in user_context.splitlines():
+        match = pattern.match(line)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _default_follow_up(question: str, user_context: str | None) -> str | None:
+    """Ask for a missing high-value detail without guessing anything about the user."""
+    business_idea = _profile_value(user_context, "Business idea")
+    location = _profile_value(user_context, "State or Union Territory")
+    budget = _profile_value(user_context, "Approximate starting budget (INR)")
+    business_question = bool(
+        business_idea
+        or re.search(
+            r"\b(?:business|business idea|start|starting|launch|pickle|achaar|"
+            r"enterprise|sell|selling|making)\b",
+            question,
+            re.IGNORECASE,
+        )
+    )
+    if business_question and not location:
+        return "Which state or union territory do you plan to operate in?"
+    if location and not budget and re.search(
+        r"\b(?:funding|loan|budget|cost|investment|support)\b", question, re.IGNORECASE
+    ):
+        return "What approximate starting budget in INR are you planning for?"
+    return None
+
+
 def _render_citations(evidence_ids: list[str], by_id: dict[str, dict[str, Any]]) -> str:
     """Render deduplicated source/page citations from retrieved metadata only."""
     pairs = []
@@ -343,7 +389,12 @@ def _ambiguous_amount_sources(text: str, evidence: list[dict[str, Any]]) -> list
     return matching
 
 
-def render_answer(payload: Any, passages: list[dict[str, Any]], question: str) -> str:
+def render_answer(
+    payload: Any,
+    passages: list[dict[str, Any]],
+    question: str,
+    user_context: str | None = None,
+) -> str:
     """Validate structured model claims and render concise, metadata-based citations."""
     if not isinstance(payload, dict):
         raise AnswerError("The answer service returned an invalid structured response.")
@@ -494,6 +545,20 @@ def render_answer(payload: Any, passages: list[dict[str, Any]], question: str) -
         seen_suggestions.add(normalized)
         suggestions.append(f"- {suggestion}")
 
+    # The user's missing location is particularly important for local business
+    # guidance. Prefer this targeted question over a generic model follow-up.
+    follow_up = _default_follow_up(question, user_context)
+    if follow_up is None:
+        model_follow_up = payload.get("follow_up")
+        if isinstance(model_follow_up, str):
+            candidate = " ".join(model_follow_up.split())
+            if (
+                candidate.endswith("?")
+                and candidate.count("?") == 1
+                and not CITATION_LIKE_PATTERN.search(candidate)
+            ):
+                follow_up = candidate
+
     sections = []
     if documented:
         sections.append("What the documents say\n" + "\n".join(documented))
@@ -502,18 +567,23 @@ def render_answer(payload: Any, passages: list[dict[str, Any]], question: str) -
     if suggestions:
         sections.append("General suggestions\n" + "\n".join(suggestions))
     if not sections:
-        return (
+        insufficient = (
             "What could not be verified\n"
             "- The retrieved local passages do not establish the requested information; "
             "this does not mean the support is unavailable.\n"
             "- External official-source research has not been performed. You can request "
             "or enable that step to check current authoritative information."
         )
+        if follow_up:
+            insufficient += f"\n\nOne follow-up question\n- {follow_up}"
+        return insufficient
     if uncertain:
         sections[1 if documented else 0] += (
             "\n- External official-source research has not been performed. You can request "
             "or enable that step to check current authoritative information."
         )
+    if follow_up:
+        sections.append("One follow-up question\n- " + follow_up)
     return "\n\n".join(sections)
 
 
@@ -577,14 +647,21 @@ def answer_question(
             )
             raise AnswerError(f"Local retrieval failed: {detail}") from None
     if not passages:
-        return (
+        insufficient = (
             "The available scheme documents are insufficient to answer this question: "
             "no relevant passages were retrieved. This does not mean the support is "
             "unavailable. External official-source research has not been performed; "
-            "you can request or enable that step to check current details. To help "
-            "narrow the search, share your state or union territory, business type, "
-            "ownership, business stage, and approximate funding need."
+            "you can request or enable that step to check current details."
         )
+        follow_up = _default_follow_up(question, user_context)
+        if follow_up:
+            insufficient += f"\n\nOne follow-up question\n- {follow_up}"
+        else:
+            insufficient += (
+                " To help narrow the search, share your state or union territory, "
+                "business type, ownership, business stage, and approximate funding need."
+            )
+        return insufficient
 
     api_key, selected_model = _load_configuration()
     client = groq_client if groq_client is not None else _create_groq_client(api_key)
@@ -603,7 +680,7 @@ def answer_question(
             raise AnswerError(
                 "The answer service returned an invalid structured response. Please retry."
             ) from None
-        return render_answer(payload, passages, question)
+        return render_answer(payload, passages, question, user_context=user_context)
     except AnswerError:
         raise
     except Exception as exc:
