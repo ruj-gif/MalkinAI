@@ -154,6 +154,44 @@ class AnswerTests(unittest.TestCase):
         answer_question("My question", top_k=3, groq_client=client, retriever=retriever)
         retriever.assert_called_once_with("My question", 3)
 
+    def test_follow_up_context_is_sent_to_model_and_used_for_retrieval(self):
+        client = mocked_client()
+        previous = [
+            {"role": "user", "content": "I want to start a pickle business."},
+            {"role": "assistant", "content": "The document lists achaar making. [Mudra_Offerings.pdf, p. 4]"},
+        ]
+        memory = {
+            "version": 1,
+            "user_provided": {
+                "business_idea": "pickle business",
+                "products": [],
+                "state_or_location": "Gujarat",
+                "starting_budget": {"amount": "80000", "currency": "INR"},
+            },
+            "assistant_suggestions": ["Do not treat me as a fact"],
+            "document_facts": ["Do not reuse stale document facts"],
+        }
+        retriever = Mock(return_value=[SAMPLE_PASSAGE])
+        answer_question(
+            "What about the cost of it?",
+            retriever=retriever,
+            groq_client=client,
+            conversation_history=previous,
+            conversation_summary="Earlier: user is exploring pickle making.",
+            business_memory=memory,
+        )
+        retrieval_query = retriever.call_args.args[0]
+        self.assertIn("What about the cost of it?", retrieval_query)
+        self.assertIn("pickle business", retrieval_query)
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        self.assertIn("Recent conversation turns", prompt)
+        self.assertIn("Mudra_Offerings.pdf, p. 4", prompt)
+        self.assertIn("Rolling conversation summary", prompt)
+        self.assertIn("Gujarat", prompt)
+        self.assertIn("80000", prompt)
+        self.assertNotIn("Do not treat me as a fact", prompt)
+        self.assertNotIn("Do not reuse stale document facts", prompt)
+
     def test_retrieval_diagnostics_log_failure_without_credentials(self):
         def failing_retriever(question, top_k):
             raise RuntimeError("embedding model unavailable; GROQ_API_KEY=gsk_secret-value")
