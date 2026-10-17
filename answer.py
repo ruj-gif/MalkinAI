@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -112,13 +113,23 @@ _CREDENTIAL_PATTERN = re.compile(
 
 def _safe_diagnostic_detail(error: Exception) -> str:
     """Return useful error context with common credential formats redacted."""
-    message = str(error).strip() or "No error message provided."
-    message = _CREDENTIAL_PATTERN.sub(
+    return _redact_diagnostic_text(str(error).strip() or "No error message provided.")[:500]
+
+
+def _redact_diagnostic_text(value: str) -> str:
+    """Redact common API-key formats from messages and formatted tracebacks."""
+    return _CREDENTIAL_PATTERN.sub(
         lambda match: (match.group(1) or match.group(2) or "[REDACTED]")
         + ("[REDACTED]" if match.group(1) or match.group(2) else ""),
-        message,
+        value,
     )
-    return message[:500]
+
+
+def _safe_diagnostic_traceback(error: Exception) -> str:
+    """Format a traceback without exposing common credential formats."""
+    return _redact_diagnostic_text(
+        "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    )
 
 
 def search_official_sources(question: str) -> list[dict[str, Any]]:
@@ -522,14 +533,17 @@ def answer_question(
         try:
             passages = retriever(question.strip(), top_k)
         except Exception as exc:
-            # Keep the UI response generic; server logs retain a sanitized cause
-            # such as a missing index, malformed JSON, or an unavailable model.
+            # Keep the UI response generic; server logs retain the sanitized
+            # traceback needed to identify missing files, invalid data, or model failures.
+            detail = _safe_diagnostic_detail(exc)
+            diagnostic_traceback = _safe_diagnostic_traceback(exc)
             LOGGER.error(
-                "Local retrieval failed (%s): %s",
+                "Local retrieval failed (%s): %s\nTraceback:\n%s",
                 type(exc).__name__,
-                _safe_diagnostic_detail(exc),
+                detail,
+                diagnostic_traceback,
             )
-            raise AnswerError(f"Local retrieval failed: {exc}") from None
+            raise AnswerError(f"Local retrieval failed: {detail}") from None
     if not passages:
         return (
             "The available scheme documents are insufficient to answer this question: "

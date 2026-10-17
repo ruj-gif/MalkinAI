@@ -213,6 +213,13 @@ class RetrievalTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 load_index(Path(temp_dir) / "missing.json")
 
+    def test_load_index_reports_invalid_json(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent / "processed") as temp_dir:
+            path = Path(temp_dir) / "index.json"
+            path.write_text('{"items": [}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Could not parse embedding index"):
+                load_index(path)
+
 
 if __name__ == "__main__":
     unittest.main()

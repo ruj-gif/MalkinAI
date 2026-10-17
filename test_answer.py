@@ -108,14 +108,17 @@ class AnswerTests(unittest.TestCase):
             raise RuntimeError("embedding model unavailable; GROQ_API_KEY=gsk_secret-value")
 
         with self.assertLogs("answer", level="ERROR") as captured:
-            with self.assertRaisesRegex(AnswerError, "Local retrieval failed"):
+            with self.assertRaisesRegex(AnswerError, "Local retrieval failed") as error:
                 answer_question("Question", retriever=failing_retriever)
 
         logged = "\n".join(captured.output)
         self.assertIn("RuntimeError", logged)
         self.assertIn("embedding model unavailable", logged)
         self.assertIn("GROQ_API_KEY=[REDACTED]", logged)
+        self.assertIn("Traceback:", logged)
+        self.assertIn("failing_retriever", logged)
         self.assertNotIn("gsk_secret-value", logged)
+        self.assertNotIn("gsk_secret-value", str(error.exception))
 
     def test_empty_retrieval_returns_insufficient_evidence_without_api_call(self):
         client = mocked_client()
